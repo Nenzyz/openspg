@@ -18,7 +18,8 @@
 7. [Data Models & Type System](#data-models)
 8. [LLM Integration Patterns](#llm-integration)
 9. [Architecture Patterns](#architecture-patterns)
-10. [Implementation Checklist](#implementation-checklist)
+10. [Real-World Use Cases & Applications](#use-cases)
+11. [Implementation Checklist](#implementation-checklist)
 
 ---
 
@@ -1261,9 +1262,618 @@ Define → Validate → Persist → Propagate → Index → Notify
 
 ---
 
-## 9. Implementation Checklist
+## 10. Real-World Use Cases & Applications
 
-### 9.1 Core Components
+This section provides concrete examples from OpenSPG's test suite and real deployments, demonstrating practical applications across different industries.
+
+### 10.1 Financial Risk Mining
+
+**Domain:** Anti-fraud, risk detection, black market detection
+
+**Schema:**
+- **Entities:** Person, Company, App, Device, Cert (Certificate)
+- **Concepts:** TaxOfRiskUser, TaxOfRiskApp
+- **Relations:** holdShare, hasCert, install, useCert, belongTo
+
+#### Use Case 10.1.1: Black Market App Detection
+
+**Problem:** Identify malicious apps and their target users through domain usage patterns.
+
+**KGDSL Implementation:**
+```kgdsl
+// Step 1: Define derived property - calculate black domain relation rate
+Define (s:DomainFamily)-[p:black_relate_rate]->(o:Pkg) {
+    GraphStructure {
+        (o)-[:use]->(d:Domain),
+        (d)-[belong]->(s)
+    }
+    Rule {
+        R1: o.is_black == true
+        domain_num = group(s,o).count(d)
+        p.same_domain_num = domain_num
+    }
+}
+
+// Step 2: Define total domain count per family
+Define (s:DomainFamily)-[p:total_domain_num]->(o:Int) {
+    GraphStructure {
+        (s)<-[:belong]-(d:Domain)
+    }
+    Rule {
+        o = group(s).count(d)
+    }
+}
+
+// Step 3: Identify targeted users
+Define (s:Pkg)-[p:target]->(o:User) {
+    GraphStructure {
+        (s)<-[p1:black_relate_rate]-(df:DomainFamily),
+        (df)<-[:belong]-(d:Domain),
+        (o)-[visit]->(d)
+    }
+    Rule {
+        visit_time = group(o, df).count(d)
+        R1("必须大于2次"): visit_time > 1
+        R2("必须占比大于50%"): visit_time / df.total_domain_num > 0.5
+    }
+}
+
+// Step 4: Query targeted users
+GraphStructure {
+    (s:Pkg)-[p:target]->(o:User)
+}
+Rule { }
+Action {
+    get(s.id, o.id)
+}
+```
+
+**Key Patterns:**
+1. **Multi-hop derived relations** - Building complex predicates through graph patterns
+2. **Aggregation-based rules** - Using group() to compute statistics
+3. **Threshold-based detection** - Combining multiple conditions for risk scoring
+
+#### Use Case 10.1.2: Account Fund Risk Detection
+
+**Problem:** Detect suspicious fund transfer patterns indicating money laundering.
+
+**KGDSL Implementation:**
+```kgdsl
+GraphStructure {
+    s [CustFundKG.Account, __start__='true']
+    inUser, inUser2, outUser [CustFundKG.Account]
+    inUser -> s[accountFundContact] as in1
+    inUser2 -> s[accountFundContact] as in2
+    s -> outUser [accountFundContact] as out
+}
+Rule {
+    // Detect same-day simultaneous transfers
+    R1("当天同时转入"): floor(abs(ceil(date_diff(in1.transDate, in2.transDate)))) == 0
+
+    // Count outbound transactions
+    tranOutNum = group(s).count(out)
+
+    // Flag if >= 5 outbound transfers
+    o = rule_value(tranOutNum >= 5, true, false)
+}
+Action {
+    get(s.id, o)
+}
+```
+
+**Key Patterns:**
+1. **Triangle/multi-party patterns** - Detecting coordination between accounts
+2. **Temporal constraints** - Using date_diff for time-based detection
+3. **Conditional labeling** - rule_value for binary classification
+
+#### Use Case 10.1.3: Credit Card Fraud Detection
+
+**Problem:** Classify users based on credit card binding behavior.
+
+**KGDSL Implementation:**
+```kgdsl
+Define (s:User where id==$id)-[p:belongTo]->(o:`accountQueryCrowd`/`cardUser`) {
+    GraphStructure {
+        (s)<-[E1:relateCreditCardPaymentBindEvent]-(evt:creditCardPaymentBindEvent)
+    }
+    Rule {
+        R1("银行卡规则"): evt.cardBank in ['PingAnBank', 'CITIC']
+        R2("是否查询账户"): evt.accountQuery == 'Y'
+        R3("是否绑定"): evt.bindSelf == $bindSelf
+
+        BindNum = group(s).sum(evt.cardNum)
+        R4('绑定数目'): BindNum > 0
+        R5('智信确权'): s.zhixin == 'Y'
+    }
+}
+```
+
+**Key Patterns:**
+1. **Parameterized queries** - Using $id, $bindSelf for runtime binding
+2. **Concept classification** - Mapping users to concept instances
+3. **Multi-condition validation** - Combining bank, query, and binding rules
+
+---
+
+### 10.2 Medical Knowledge Graph
+
+**Domain:** Healthcare, diagnosis support, patient profiling
+
+**Schema:**
+- **Entities:** Patient, Disease, PatientIndex (examination indices)
+- **Relations:** inspectionIndex (patient to index)
+
+#### Use Case 10.2.1: Disease Diagnosis Support
+
+**Problem:** Find patients with specific inspection indices and diseases.
+
+**Graph Construction:**
+```java
+// Vertices
+constructionVertex("u1", "ProfMedV1.Patient")
+constructionVertex("index1", "ProfMedV1.PatientIndex", "entity", "影像学检查")
+constructionVertex("前列腺癌", "ProfMedV1.Disease")
+
+// Edges
+constructionEdge("u1", "inspectionIndex", "index1")
+```
+
+**KGDSL Query:**
+```kgdsl
+GraphStructure {
+    (patient:ProfMedV1.Patient)-[:inspectionIndex]->(idx:ProfMedV1.PatientIndex),
+    (patient)-[:hasDiagnosis]->(disease:ProfMedV1.Disease)
+}
+Rule {
+    R1("影像学检查"): idx.entity == '影像学检查'
+    R2("癌症诊断"): disease.name like '.*癌'
+}
+Action {
+    get(patient.id, disease.name, idx.entity)
+}
+```
+
+**Key Patterns:**
+1. **Clinical pathway modeling** - Patient → Inspection → Diagnosis
+2. **Pattern matching on medical entities** - Regex for disease classification
+3. **Multi-modal data integration** - Combining structured and inspection data
+
+---
+
+### 10.3 Film Industry & Entertainment
+
+**Domain:** Movie recommendations, collaboration networks
+
+**Schema:**
+- **Entities:** Film, FilmDirector, FilmWriter, Actor
+- **Relations:** directFilm, writerOfFilm, workmates, actInFilm
+
+#### Use Case 10.3.1: Director-Writer Collaboration Discovery
+
+**Problem:** Find films where post-1980 directors work with writers of the same gender.
+
+**KGDSL Implementation:**
+```kgdsl
+GraphStructure {
+    (A:Film)-[E1:directFilm]-(B:FilmDirector)
+    (A:Film)-[E2:writerOfFilm]-(C:FilmWriter)
+    (B:FilmDirector)-[E3:workmates]-(C:FilmWriter)
+}
+Rule {
+    R1("80后导演"): B.birthDate > '1980'
+    R2("导演编剧同性别"): B.gender == C.gender
+}
+Action {
+    get(B.name, C.name)
+}
+```
+
+**Key Patterns:**
+1. **Triangle pattern** - Film-Director-Writer relationships
+2. **Demographic filtering** - Age and gender constraints
+3. **Collaboration network analysis** - Workmate relationships
+
+---
+
+### 10.4 Geospatial & Location-Based Services
+
+**Domain:** Urban planning, proximity search, location intelligence
+
+#### Use Case 10.4.1: Proximity-Based Amenity Search
+
+**Problem:** Find subway stations near parks within 10km radius.
+
+**KGDSL Implementation:**
+```kgdsl
+GraphStructure {
+    (s:Park)-[e:nearby(s.boundary, o.center, 10)]->(o:Subway)
+}
+Rule { }
+Action {
+    get(s.name, o.name, distance(s.boundary, o.center) as dist)
+}
+```
+
+**Key Patterns:**
+1. **Linked edges with function-based connection** - nearby(geometry1, geometry2, distance)
+2. **Spatial predicates** - Geometric distance calculation
+3. **GIS integration** - Boundary/center point processing
+
+**Linked Edge Semantics:**
+- `nearby(s.boundary, o.center, 10)` is NOT a stored edge
+- Computed at query time using spatial index
+- Parameters: source geometry, target geometry, max distance
+
+---
+
+### 10.5 Social Network & User Profiling
+
+**Domain:** User segmentation, demographic analysis, personalization
+
+#### Use Case 10.5.1: User Classification - "高富帅" vs "白富美"
+
+**Problem:** Classify users into categories based on complex multi-attribute rules.
+
+**KGDSL Implementation:**
+```kgdsl
+GraphStructure {
+    (s:User)
+}
+Rule {
+    R1('有房'): s.haveHouse == 'Y'
+    R2('有车'): s.haveCar == 'Y'
+    R3('男性'): s.gender == '男'
+    R4('女性'): s.gender == '女'
+    R5('颜值高'): s.beautiful > 8
+    R6('长得高'): (R3 && s.height > 180) || (R4 && s.height > 170)
+    R7('高富帅'): R1 && R2 && R3 && R5 && R6
+    R8('白富美'): R1 && R2 && R4 && R5 && R6
+
+    // Nested rule_value for classification
+    o = rule_value(R7, '高富帅', rule_value(R8, '白富美', '普通人'))
+}
+Action {
+    get(s.id, o as category)
+}
+```
+
+**Key Patterns:**
+1. **Rule composition** - Building complex rules from simple ones (R7 depends on R1-R6)
+2. **Hierarchical classification** - Nested rule_value for multi-class output
+3. **Gender-specific thresholds** - Different height criteria for male/female
+
+---
+
+### 10.6 Supply Chain & Enterprise Networks
+
+**Domain:** Corporate relationship analysis, supply chain risk
+
+**Schema:**
+- **Entities:** Company, Cert (Certificate)
+- **Relations:** holdShare (equity), hasCert (certification)
+
+#### Use Case 10.6.1: Equity Chain Analysis
+
+**Problem:** Trace ownership structures through shareholding chains.
+
+**KGDSL Implementation:**
+```kgdsl
+GraphStructure {
+    (root:Company where id==$rootId)-[:holdShare*1..5]->(subsidiary:Company)
+}
+Rule {
+    R1("控股关系"): path.shareRatio > 0.3
+    totalShares = group(root).sum(path.shareRatio)
+}
+Action {
+    get(root.name, subsidiary.name, totalShares)
+}
+```
+
+**Key Patterns:**
+1. **Variable-length path** - `[:holdShare*1..5]` for multi-hop ownership
+2. **Path aggregation** - Computing cumulative shareholding
+3. **Threshold-based filtering** - Control threshold (30%)
+
+---
+
+### 10.7 E-Commerce & Product Graphs
+
+**Domain:** Product recommendations, user behavior analysis
+
+#### Use Case 10.7.1: Collaborative Filtering
+
+**Problem:** Recommend products based on similar users' purchases.
+
+**KGDSL Implementation:**
+```kgdsl
+GraphStructure {
+    (targetUser:User where id==$userId),
+    (targetUser)-[:purchased]->(product1:Product),
+    (similarUser:User)-[:purchased]->(product1),
+    (similarUser)-[:purchased]->(product2:Product)
+}
+Rule {
+    R1("未购买"): not exists((targetUser)-[:purchased]->(product2))
+
+    // Calculate similarity score
+    commonProducts = group(targetUser, similarUser).count(product1)
+    R2("相似度"): commonProducts > 3
+
+    // Rank by popularity
+    popularity = group(product2).count(similarUser)
+}
+Action {
+    get(product2.id, product2.name, popularity)
+    .sort(popularity desc)
+    .limit(10)
+}
+```
+
+**Key Patterns:**
+1. **Graph-based collaborative filtering** - User-Product-User-Product paths
+2. **Negative constraints** - `not exists()` for novelty
+3. **Ranking and recommendation** - Popularity-based sorting
+
+---
+
+### 10.8 Cyber Security & Threat Intelligence
+
+**Domain:** Attack pattern detection, threat actor profiling
+
+#### Use Case 10.8.1: Attack Campaign Detection
+
+**Problem:** Identify coordinated attacks from the same threat group.
+
+**KGDSL Implementation:**
+```kgdsl
+Define (attacker:ThreatActor)-[p:usesTTP]->(ttp:Technique) {
+    GraphStructure {
+        (attacker)-[:conducts]->(incident:Incident),
+        (incident)-[:observes]->(indicator:Indicator),
+        (indicator)-[:indicates]->(ttp)
+    }
+    Rule {
+        // Temporal clustering
+        R1("近期活动"): date_diff(now(), incident.timestamp) <= 90
+
+        // Pattern frequency
+        frequency = group(attacker, ttp).count(incident)
+        R2("高频TTP"): frequency >= 3
+    }
+}
+
+GraphStructure {
+    (attacker:ThreatActor)-[:usesTTP]->(ttp:Technique),
+    (attacker)-[:targets]->(victim:Organization)
+}
+Rule {
+    R1("APT组织"): attacker.sophistication == 'high'
+    victimCount = group(attacker).count(victim)
+}
+Action {
+    get(attacker.name, ttp.id, victimCount)
+}
+```
+
+**Key Patterns:**
+1. **Temporal clustering** - Grouping recent incidents
+2. **Behavioral fingerprinting** - TTP (Tactics, Techniques, Procedures) profiling
+3. **Campaign-level aggregation** - Counting victims per actor
+
+---
+
+### 10.9 Application Pattern Taxonomy
+
+Based on the use cases above, OpenSPG applications fall into these categories:
+
+#### 10.9.1 Graph Pattern Types
+
+1. **Star Pattern** - One central entity with multiple relations
+   - Example: User classification (User with multiple properties)
+
+2. **Triangle Pattern** - Three entities with circular relationships
+   - Example: Film-Director-Writer collaboration
+
+3. **Chain Pattern** - Linear multi-hop traversal
+   - Example: Supply chain tracing
+
+4. **Fan-out/Fan-in Pattern** - Hub entities with many connections
+   - Example: Risk mining (accounts with many transfers)
+
+5. **Temporal Pattern** - Time-windowed queries
+   - Example: Recent transaction analysis
+
+6. **Geospatial Pattern** - Location-based proximity
+   - Example: Park-Subway proximity search
+
+#### 10.9.2 Rule Pattern Types
+
+1. **Threshold Rules** - Numeric comparisons
+   ```kgdsl
+   R1: count > 5
+   R2: ratio > 0.3
+   ```
+
+2. **Composition Rules** - Logical combinations
+   ```kgdsl
+   R3: R1 && R2
+   R4: (R1 || R2) && !R3
+   ```
+
+3. **Aggregation Rules** - Group-by computations
+   ```kgdsl
+   total = group(user).sum(amount)
+   avg = group(category).avg(price)
+   ```
+
+4. **Conditional Rules** - If-then logic
+   ```kgdsl
+   category = rule_value(R1, 'VIP', rule_value(R2, 'Regular', 'Guest'))
+   ```
+
+5. **Temporal Rules** - Date/time constraints
+   ```kgdsl
+   R1: date_diff(now(), event.timestamp) <= 30
+   ```
+
+6. **Fuzzy Matching Rules** - Pattern matching
+   ```kgdsl
+   R1: name like '.*Corp'
+   R2: email rlike '^[\w\.-]+@[\w\.-]+\.\w+$'
+   ```
+
+#### 10.9.3 Common Use Case Templates
+
+**Template 1: Risk Scoring**
+```kgdsl
+GraphStructure {
+    (entity:EntityType)-[relations*]->(connected:EntityType)
+}
+Rule {
+    // Feature extraction
+    feature1 = group(entity).count(connected)
+    feature2 = group(entity).avg(relation.weight)
+
+    // Risk conditions
+    R1: feature1 > threshold1
+    R2: feature2 < threshold2
+
+    // Score computation
+    riskScore = rule_value(R1 && R2, 100,
+                           rule_value(R1, 60,
+                                      rule_value(R2, 40, 0)))
+}
+Action {
+    get(entity.id, riskScore)
+}
+```
+
+**Template 2: Entity Resolution**
+```kgdsl
+Define (s:Entity1)-[p:sameAs]->(o:Entity2) {
+    GraphStructure {
+        (s)-[:hasAttribute]->(attr:Attribute),
+        (o)-[:hasAttribute]->(attr)
+    }
+    Rule {
+        // Similarity metrics
+        commonAttrs = group(s, o).count(attr)
+        totalAttrs = group(s).count(attr) + group(o).count(attr)
+        similarity = commonAttrs * 2.0 / totalAttrs
+
+        R1("高相似度"): similarity > 0.8
+    }
+}
+```
+
+**Template 3: Path Finding**
+```kgdsl
+GraphStructure {
+    (start:NodeType where id==$startId)-[path:relationType*1..5]->(end:NodeType where id==$endId)
+}
+Rule {
+    R1("路径约束"): path.weight.sum() < maxCost
+    pathLength = path.edges().count()
+}
+Action {
+    get(path, pathLength)
+    .sort(pathLength asc)
+    .limit(1)  // Shortest path
+}
+```
+
+---
+
+### 10.10 Best Practices from Real Use Cases
+
+1. **Incremental Rule Building**
+   - Start with simple rules (R1, R2)
+   - Compose into complex conditions (R3: R1 && R2)
+   - Enables easier debugging and maintenance
+
+2. **Parameterization**
+   - Use `$param` for runtime values
+   - Enables query reuse across different inputs
+   - Example: `where id==$userId`
+
+3. **Concept-Based Classification**
+   - Map entities to concept instances for standardization
+   - Example: `belongTo:TaxOfRiskUser/HighRiskUser`
+   - Enables ontology-driven reasoning
+
+4. **Multi-Stage Define Statements**
+   - Break complex derivations into multiple Define blocks
+   - Each Define creates a reusable derived predicate
+   - Final query combines all derived predicates
+
+5. **Aggregation Grouping Strategy**
+   - Group by minimal necessary dimensions
+   - Use multiple aggregations in same group for efficiency
+   - Example: `group(s).count(o).sum(o.amount).avg(o.price)`
+
+6. **Temporal Windowing**
+   - Always include time constraints for large graphs
+   - Use `date_diff()` for relative time windows
+   - Index timestamp fields for performance
+
+7. **Negative Filtering**
+   - Use `not exists()` for exclusion patterns
+   - More efficient than left outer join + null check
+   - Example: "Users who haven't purchased product X"
+
+8. **Linked Edge for Computed Relations**
+   - Use function-based edges for expensive computations
+   - Avoid materializing all possible connections
+   - Example: Geospatial proximity, similarity scores
+
+---
+
+### 10.11 Performance Patterns
+
+1. **Filter Pushdown**
+   ```kgdsl
+   // Good: Filter early
+   (s:User where age > 18)-[:purchased]->(p:Product)
+
+   // Bad: Filter late
+   (s:User)-[:purchased]->(p:Product) ... Rule { R1: s.age > 18 }
+   ```
+
+2. **Limit Early**
+   ```kgdsl
+   // Good: Per-node limit
+   (s:User)-[e:follows per_node_limit 10]->(friend:User)
+
+   // Bad: Global limit after full expansion
+   (s:User)-[e:follows]->(friend:User) ... Action { get(...).limit(10) }
+   ```
+
+3. **Index-Backed Queries**
+   ```kgdsl
+   // Ensure indexed: s.id, s.email
+   (s:User where id==$userId)  // Index seek
+   (s:User where email like '%@gmail.com')  // Index scan
+   ```
+
+4. **Avoid Cartesian Products**
+   ```kgdsl
+   // Good: Connected patterns
+   (a)-[:rel1]->(b)-[:rel2]->(c)
+
+   // Bad: Disconnected patterns (Cartesian product)
+   (a), (b), (c)  // Missing connections
+   ```
+
+---
+
+This completes the real-world use cases section, providing concrete examples from financial services, healthcare, entertainment, geospatial, social networks, supply chain, e-commerce, and cybersecurity domains.
+
+---
+
+## 11. Implementation Checklist
+
+### 11.1 Core Components
 
 - [ ] **KGDSL Parser**
   - [ ] ANTLR4 grammar implementation
@@ -1289,7 +1899,7 @@ Define → Validate → Persist → Propagate → Index → Notify
   - [ ] Aggregation engine
   - [ ] Query optimizer
 
-### 9.2 Storage Adapters
+### 11.2 Storage Adapters
 
 - [ ] **Graph Store Interface**
   - [ ] Vertex CRUD operations
@@ -1308,7 +1918,7 @@ Define → Validate → Persist → Propagate → Index → Notify
   - [ ] TTL support
   - [ ] Distributed caching
 
-### 9.3 API Layer
+### 11.3 API Layer
 
 - [ ] **HTTP API**
   - [ ] Schema management endpoints
@@ -1321,7 +1931,7 @@ Define → Validate → Persist → Propagate → Index → Notify
   - [ ] Java client library
   - [ ] Query builder utilities
 
-### 9.4 Integration Components
+### 11.4 Integration Components
 
 - [ ] **LLM Integration**
   - [ ] KG2Prompt conversion
@@ -1333,7 +1943,7 @@ Define → Validate → Persist → Propagate → Index → Notify
   - [ ] Graph neural networks
   - [ ] Link prediction
 
-### 9.5 Operational Features
+### 11.5 Operational Features
 
 - [ ] **Monitoring**
   - [ ] Query performance metrics
@@ -1347,9 +1957,9 @@ Define → Validate → Persist → Propagate → Index → Notify
 
 ---
 
-## 10. Key Implementation Insights
+## 12. Key Implementation Insights
 
-### 10.1 Critical Design Decisions
+### 12.1 Critical Design Decisions
 
 1. **Hybrid LPG+RDF Model:**
    - Use property graph for storage efficiency
@@ -1371,7 +1981,7 @@ Define → Validate → Persist → Propagate → Index → Notify
    - Compile to execution plans
    - Optimize using rule-based & cost-based techniques
 
-### 10.2 Performance Considerations
+### 12.2 Performance Considerations
 
 1. **Query Optimization:**
    - Index selection critical for performance
@@ -1388,7 +1998,7 @@ Define → Validate → Persist → Propagate → Index → Notify
    - Hot path results cached
    - Invalidation on schema changes
 
-### 10.3 Common Pitfalls
+### 12.3 Common Pitfalls
 
 1. **Over-normalization:** Balance semantic richness with query complexity
 2. **Circular Dependencies:** Carefully design rule dependency graphs
